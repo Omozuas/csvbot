@@ -21,58 +21,75 @@ function parseCSVFromBuffer(buffer) {
   });
 }
 
-async function handleQuery(nlQuery, transactionsBuffer, payersBuffer) {
-  const [taxData, payers] = await Promise.all([
-    parseCSVFromBuffer(transactionsBuffer),
-    parseCSVFromBuffer(payersBuffer)
-  ]);
-
-  const payerMap = Object.fromEntries(payers.map(p => [p.insurance_number, p]));
-
-  const enriched = taxData.map(tx => ({
-    ...tx,
-    Transaction_amount: parseFloat(tx.Transaction_amount),
-    Expected_Tax_Amount: parseFloat(tx.Expected_Tax_Amount),
-    Tax_Amount_Paid: parseFloat(tx.Tax_Amount_Paid),
-    ...payerMap[tx.Custiner_TIN]
-  }));
-
-  let logicBody = getCachedLogic(nlQuery);
-  if (!logicBody) {
-    logicBody = await getFilterLogic(nlQuery);
-    setCachedLogic(nlQuery, logicBody);
+/**
+ * @param {string} nlQuery - natural language query
+ * @param {Object} csvBuffers - key-value pairs { fileName: buffer }
+ */
+async function handleQuery(nlQuery, csvBuffers) {
+  if (!nlQuery || !csvBuffers || Object.keys(csvBuffers).length === 0) {
+    throw new Error('Query and CSV files are required.');
   }
 
-  let filterFn;
-  try {
-    filterFn = eval(`(record) => { ${logicBody} }`);
-  } catch (err) {
-    throw new Error('Invalid GPT logic');
+  // ✅ Parse each CSV buffer
+  const parsedTables = {};
+  for (const [filename, buffer] of Object.entries(csvBuffers)) {
+    const rows = await parseCSVFromBuffer(buffer);
+    if (!Array.isArray(rows)) throw new Error(`Invalid CSV content in ${filename}`);
+    const name = filename.replace(/\..*$/, ''); // strip .csv extension
+    parsedTables[name] = rows;
   }
-const sessionId = uuidv4();
-  const filtered = enriched.filter(filterFn);
 
-  // ✅ Export results to CSV
-  const csvPath = exportToCSV(filtered,sessionId);
+  // ✅ Prepare preview for GPT
+  const previewText = Object.entries(parsedTables)
+    .map(([tableName, rows]) => {
+      const fields = Object.keys(rows[0] || {});
+      const preview = rows.slice(0, 5);
+      return `📁 Table: ${tableName}\nFields: ${fields.join(', ')}\nSample:\n${JSON.stringify(preview, null, 2)}`;
+    })
+    .join('\n\n');
 
-  // ✅ Log query
-  logQuery(nlQuery, filtered, csvPath, sessionId);
-let downloadUrl = null;
-if (csvPath) {
-const filename = path.basename(csvPath);
-downloadUrl = `/download/${filename}`;
+  const firstTable = Object.values(parsedTables)[0] || [];
+  const previewSample = firstTable;
+  const sessionId = uuidv4();
+
+  // 🔍 Check cache
+  let answer = getCachedLogic(nlQuery);
+
+  if (!answer) {
+    const interpretation = await getFilterLogic(nlQuery, previewSample, previewText);
+
+    if (!interpretation || interpretation.type !== 'answer') {
+      throw new Error('Unsupported GPT response or failed to parse');
+    }
+
+    answer = interpretation.content;
+    setCachedLogic(nlQuery, answer);
+  }
+
+  const { summary, explanation, data } = answer;
+
+  const csvPath = Array.isArray(data) && data.length && typeof data[0] === 'object'
+    ? exportToCSV(data, sessionId)
+    : null;
+
+  const downloadUrl = csvPath ? `/download/${path.basename(csvPath)}` : null;
+
+  // ✅ Save session
+  await Session.create({ sessionId, data: parsedTables });
+
+  // ✅ Log query + result
+  logQuery(nlQuery, data, csvPath, sessionId);
+
+  return {
+    sessionId,
+    summary,
+    explanation,
+    matchCount: Array.isArray(data) ? data.length : 0,
+    result: data,
+    csvExport: csvPath || 'No CSV generated (empty or invalid result)',
+    downloadUrl,
+    tables: Object.keys(parsedTables)
+  };
 }
-// Generate sessionId and save to MongoDB
 
-await Session.create({ sessionId, data: enriched });
-
-return {
-sessionId,
-matchCount: filtered.length,
-csvExport: csvPath|| 'No CSV generated (empty result)',
-result: filtered,
-downloadUrl
-};
-}
-
-module.exports = { handleQuery , parseCSVFromBuffer };
+module.exports = { handleQuery, parseCSVFromBuffer };

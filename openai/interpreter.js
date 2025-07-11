@@ -2,44 +2,47 @@ const { OpenAI } = require('openai');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const { getCachedLogic, setCachedLogic } = require('../logic/gptCache');
 
-async function getFilterLogic(nlQuery, previewSample = []) {
+async function getFilterLogic(nlQuery, previewSample = [], multiTablePreview = '') {
   const cached = getCachedLogic(nlQuery);
   if (cached) {
     console.log('✅ Using cached GPT logic from cache');
-    return { type: 'function', content: cached };
+    return { type: 'answer', content: cached };
   }
 
 const prompt = `
 You are an intelligent assistant analyzing tax data.
 
 Your job is to answer user queries using real values from the structured records below.
-Data Sample:
-${JSON.stringify(previewSample.slice(0, 25), null, 2)}
+Data Preview:
+${multiTablePreview || JSON.stringify(previewSample.slice(0, 30), null, 2)}
 
 User Query:
 "${nlQuery}"
 
 Your response must:
-- Directly answer the question using the sample data
-- Compute aggregates, names, totals, or filtered results as needed
-- Provide a detailed explanation of how you interpreted the query and derived the answer
-- Return NO code, NO filter logic, ONLY data-based answers
-- Interpret the query clearly.
-- Extract data directly from the sample to produce a real, factual answer.
-- You must return actual values — not code, not logic.
-- You must provide a complete and valid JSON object with 3 parts:
-    - summary (a 1-line overview)
-    - explanation (how the answer was derived)
-    - data (list of results or aggregates)
+- Use only the data and fields shown
+- Extract real values from the sample data
+- Compute aggregates, names, totals, or filtered results
+- Provide a clear and factual explanation of how you interpreted the query
+- Return ONLY a valid JSON object with:
+    - summary (1–2 line overview)
+    - explanation (how it was computed)
+    - data (actual results — names, counts, amounts, etc.)
+- DO NOT return code, logic, or placeholder symbols like "..." or "remaining records"
+- DO NOT truncate the array — return all matching records
+- DO NOT invent fields not present in the table
+- Return only valid JSON that can be parsed in JavaScript
+- Only the first 30 rows of each table were shown to you.
+  Use this sample to understand field names and structure.
 
 Output format:
 {
   "type": "answer",
   "content": {
-    "summary": "One-line summary of what was found",
+    "summary": "One-line or two-line summary of what was found",
     "explanation": "Explain what the user asked, how you interpreted it, and how you computed this answer",
     "data": [
-      ...list of actual values like names, counts, totals or matched records...
+      ...list of actual values like names, counts,metrics, totals or matched records...
     ]
   }
 }
@@ -76,12 +79,37 @@ Return:
   }
 }
 
-⚠️ VERY IMPORTANT:
-- Do NOT include placeholder items like "...", "...remaining records", or incomplete arrays.
-- Do NOT add comments or explanation after the JSON.
-- If data exceeds 30 items, **truncate manually** and say so clearly in the explanation (e.g., "Only top 25 results shown").
-- If fields are missing in the data, say so in the explanation.
-- You must return only fully valid JSON. The response must be parsable by JavaScript.
+
+User: "List all company names"
+→ Return:
+{
+  "type": "answer",
+  "content": {
+    "summary": "25 company names were found.",
+    "explanation": "Extracted 'Name' field from all rows in the data.",
+    "data": [
+      { "name": "Alex Smith Ltd" },
+      { "name": "Zara Co." },
+      ...
+    ]
+  }
+}
+
+User: "How many companies paid over ₦10,000 in tax?"
+→ Return:
+{
+  "type": "answer",
+  "content": {
+    "summary": "4 companies paid more than ₦10,000.",
+    "explanation": "Filtered records by 'Tax_Amount_Paid > 10000'.",
+    "data": [
+      { "name": "Tolu Ltd", "taxPaid": 12000 },
+      { "name": "Zara Ventures", "taxPaid": 15000 },
+      ...
+    ]
+  }
+}
+
 
 Your response must follow the structure 100%. No exceptions.`;
 
