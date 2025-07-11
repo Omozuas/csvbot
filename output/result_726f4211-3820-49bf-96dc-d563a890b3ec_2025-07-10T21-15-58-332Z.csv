@@ -1,7 +1,0 @@
-"Name","Transaction_amount","Expected_Tax_Amount","Tax_Type"
-"Alex Moore Ltd",4158.44,311.88,"WHT"
-"Emily Miller Ltd",3731.55,279.87,"VAT"
-"Robert Wilson Ltd",4799.86,359.99,"WHT"
-"David Williams Inc",534.03,40.05,"WHT"
-"Jane Wilson Ltd",4541.14,340.59,"WHT"
-"David Wilson Inc",1595.67,119.68,"WHT"
