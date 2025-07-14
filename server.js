@@ -1,23 +1,33 @@
-require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
+const bodyPerser=require('body-parser');
+// const session = require('express-session');
+const dotenv = require('dotenv');
+const cors =require('cors');
+const cookieParser = require('cookie-parser')
+const morgan = require('morgan');
 const multer = require('multer');
 const dbConnect = require('./db/dbConnection');
 const { parseCSVFromBuffer } = require('./logic/queryProcessor');
 const { getFilterLogic } = require('./openai/interpreter');
-const { getCachedLogic, setCachedLogic } = require('./logic/gptCache');
 const { exportToCSV } = require('./logic/resultExporter');
 const { logQuery } = require('./logic/logger');
 const { v4: uuidv4 } = require('uuid');
 const Session = require('./model/session');
-const { handleConversationalFollowUp } = require('./logic/conversationalFollowUp');
 
+
+dotenv.config();
 dbConnect();
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
+app.use(cors());
+app.use(morgan('dev'));
+app.use(bodyPerser.json());
 app.use(express.json());
+app.use(express.urlencoded({extended:true}));
+app.use(cookieParser());
 
 app.post('/query', upload.fields([
   { name: 'transactions' },
