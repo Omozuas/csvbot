@@ -1,6 +1,27 @@
 const { OpenAI } = require('openai');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const { getCachedLogic, setCachedLogic } = require('../logic/gptCache');
+const { encode } = require('gpt-3-encoder'); // for token-safe previews
+
+
+function estimateTokens(text) {
+  return encode(text).length;
+}
+
+function trimPreviewSample(previewSample, tokenLimit = 1500) {
+  const rows = [];
+  let totalTokens = 0;
+
+  for (const row of previewSample) {
+    const json = JSON.stringify(row, null, 2);
+    const tokens = estimateTokens(json);
+    if (totalTokens + tokens > tokenLimit) break;
+    rows.push(row);
+    totalTokens += tokens;
+  }
+
+  return rows;
+}
 
 async function getFilterLogic(nlQuery, previewSample = [], multiTablePreview = '') {
   const cached = getCachedLogic(nlQuery);
@@ -9,12 +30,27 @@ async function getFilterLogic(nlQuery, previewSample = [], multiTablePreview = '
     return { type: 'answer', content: cached };
   }
 
-const prompt = `
-You are an intelligent assistant analyzing tax data.
+   // 🛡️ If no preview data, avoid calling GPT blindly
+  if (!previewSample || previewSample.length === 0) {
+    return {
+      type: 'message',
+      content: 'No data preview was available for GPT to interpret. Please upload or load a dataset.'
+    };
+  }
 
-Your job is to answer user queries using real values from the structured records below.
+  const trimmedSample = trimPreviewSample(previewSample);
+  const sampleText = multiTablePreview || JSON.stringify(trimmedSample, null, 2);
+
+const prompt = `
+You are an intelligent assistant analyzing tabular tax data.
+
+Your job is to:
+- Understand user queries
+- Output a structured JSON logic object OR full answer depending on the complexity
+- Use the provided data to extract real values below
+
 Data Preview:
-${multiTablePreview || JSON.stringify(previewSample.slice(0, 30), null, 2)}
+${sampleText}
 
 User Query:
 "${nlQuery}"
@@ -36,6 +72,23 @@ Your response must:
   Use this sample to understand field names and structure.
 
 Output format:
+
+{
+  "type": "logic",
+  "content": {
+    "summary": "summary of what user asked",
+    "explanation": "how you interpreted it",
+    "operation": {
+      "type": "filter | groupBy | aggregate | topK",
+      "field": "Field to operate on",
+      "operator": "== | != | > | < | contains | in | sum | count",
+      "value": "Value or array of values",
+      "groupByField": "if groupBy is used",
+      "aggregateField": "if aggregate is used"
+    }
+  }
+}
+
 {
   "type": "answer",
   "content": {
@@ -109,6 +162,19 @@ User: "How many companies paid over ₦10,000 in tax?"
     ]
   }
 }
+{
+  "type": "logic",
+  "content": {
+    "summary": "Companies that paid more than ₦10,000",
+    "explanation": "Filtered where Tax_Amount_Paid > 10000",
+    "operation": {
+      "type": "filter",
+      "field": "Tax_Amount_Paid",
+      "operator": ">",
+      "value": 10000
+    }
+  }
+}
 
 
 Your response must follow the structure 100%. No exceptions.`;
@@ -116,7 +182,7 @@ Your response must follow the structure 100%. No exceptions.`;
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
+      model: 'gpt-4',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.2
     });
@@ -132,13 +198,12 @@ if (!parsed) {
   };
 }
 
-if (parsed.type === 'answer') {
-  setCachedLogic(nlQuery, parsed.content);
-}
-
-console.log('✅ Parsed GPT response:', parsed.content);
-return parsed;
-
+   // Cache answer or logic (but not "message" responses)
+    if (parsed.type === 'logic' || parsed.type === 'answer') {
+      setCachedLogic(nlQuery, parsed.content);
+      console.log(`✅ GPT returned ${parsed.type} successfully`);
+      return parsed;
+    }
   } catch (err) {
     console.error('❌ OpenAI error:', err.message);
 
@@ -179,3 +244,4 @@ function cleanAndParseJSON(raw) {
 
 
 module.exports = { getFilterLogic };
+

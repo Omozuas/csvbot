@@ -14,6 +14,7 @@ const { getFilterLogic } = require('./openai/interpreter');
 const { exportToCSV } = require('./logic/resultExporter');
 const { logQuery } = require('./logic/logger');
 const { v4: uuidv4 } = require('uuid');
+const { applyGPTLogic } = require('./logic/logicEngine');
 const Session = require('./model/session');
 
 
@@ -126,6 +127,120 @@ app.post('/query', upload.fields([
     res.status(500).json({ error: err.message });
   }
 });
+
+
+app.post('/query-static', async (req, res) => {
+  try {
+    const { sessionId, query } = req.body;
+
+    if (!query) {
+      return res.status(400).json({ error: 'Query is required.' });
+    }
+
+    let enriched = [];
+    let sid = sessionId;
+
+    // 🚀 Step 1: Handle session or read from disk
+    if (sid) {
+      const existing = await Session.findOne({ sessionId: sid });
+      if (!existing) {
+        return res.status(404).json({ error: 'Session not found. Upload or restart query.' });
+      }
+      enriched = existing.data;
+    } else {
+      // 🔍 Read local CSV files from disk instead of req.files
+      const transactionsPath = path.join(__dirname, 'csv_file', 'sample_Tax_data.csv');
+      const payersPath = path.join(__dirname, 'csv_file', 'tax_payers.csv');
+
+      const [transactionsBuffer, payersBuffer] = await Promise.all([
+        fs.promises.readFile(transactionsPath),
+        fs.promises.readFile(payersPath)
+      ]);
+      const [transactions, payers] = await Promise.all([
+        parseCSVFromBuffer(transactionsBuffer),
+        parseCSVFromBuffer(payersBuffer)
+      ]);
+
+      // 🧠 Join transactions with payer info
+      const payerMap = Object.fromEntries(payers.map(p => [p.Payer_id, p]));
+
+      enriched = transactions.map(tx => {
+        const payer = payerMap[tx.Custiner_TIN] || {};
+        return {
+          ...tx,
+          Transaction_amount: parseFloat(tx.Transaction_amount),
+          Expected_Tax_Amount: parseFloat(tx.Expected_Tax_Amount),
+          Tax_Amount_Paid: parseFloat(tx.Tax_Amount_Paid),
+          ...payer
+        };
+      });
+
+      sid = uuidv4();
+      await Session.create({ sessionId: sid, data: enriched });
+    }
+
+    // Step 2: Ask GPT to interpret the query
+    const preview = enriched.slice(0, 30);
+    const interpretation = await getFilterLogic(query, preview);
+
+    // Step 3: Handle supported response types
+    if (interpretation.type === 'answer') {
+      const { summary, explanation, data } = interpretation.content;
+
+      const csvPath = Array.isArray(data) && data.length && typeof data[0] === 'object'
+        ? exportToCSV(data, sid)
+        : null;
+
+      const filename = csvPath ? path.basename(csvPath) : null;
+      const downloadUrl = filename ? `/download/${filename}` : null;
+
+      logQuery(query, data, csvPath, sid);
+
+      return res.json({
+        sessionId: sid,
+        mode: 'answer',
+        summary,
+        explanation,
+        result: data,
+        downloadUrl
+      });
+    }
+    if (interpretation.type === 'logic') {
+   const { summary, explanation, operation } = interpretation.content;
+
+  const result = applyGPTLogic(enriched, operation);
+  
+     const csvPath = exportToCSV(result, sid);
+
+      logQuery(query, result, csvPath, sid);
+
+
+  return res.json({
+    sessionId: sid,
+    mode: 'answer',
+    summary,
+    explanation,
+    result,
+    downloadUrl: csvPath ? `/download/${path.basename(csvPath)}` : null
+  });
+}
+    if (interpretation.type === 'message') {
+      return res.json({
+        sessionId: sid,
+        mode: 'chat',
+        answer: interpretation.content
+      });
+    }
+
+    return res.status(400).json({ error: 'Unsupported GPT response type.' });
+
+  } catch (err) {
+    console.error('[ERROR]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 
 // CSV file download
 app.get('/download/:filename', (req, res) => {
